@@ -474,6 +474,9 @@ class ClippedPGLossFn(LossFunction):
                 "sampling_importance_ratio": sample_importance_ratio.item(),
                 "num_valid_samples": sample_mask.sum().item(),
                 "approx_entropy": seq_entropy_approx.item(),
+                # Per-sample logprobs under current policy (detached, no grad).
+                # Keyed with underscore prefix to distinguish from scalar metrics.
+                "_curr_logprobs": curr_logprobs.detach().cpu(),
             },
         )
 
@@ -941,6 +944,13 @@ class SequencePackingLossWrapper:
             )
             loss_accum += loss
             for k, v in metrics.items():
+                # Non-scalar tensor outputs (prefixed with _) are concatenated, not summed.
+                if k.startswith("_"):
+                    if k not in metrics_accum:
+                        metrics_accum[k] = []
+                    metrics_accum[k].append(v)
+                    continue
+
                 if k not in metrics_accum:
                     if k in {"probs_ratio_min", "probs_ratio_clamped_min"}:
                         metrics_accum[k] = float("inf")
@@ -960,6 +970,11 @@ class SequencePackingLossWrapper:
                         metrics_accum[k] = max(metrics_accum[k], val)
                 else:
                     metrics_accum[k] += val
+
+        # Concatenate non-scalar tensor outputs across packed sequences.
+        for k in list(metrics_accum.keys()):
+            if isinstance(metrics_accum[k], list) and metrics_accum[k]:
+                metrics_accum[k] = torch.cat(metrics_accum[k], dim=0)
 
         return loss_accum, metrics_accum
 

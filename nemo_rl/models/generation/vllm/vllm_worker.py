@@ -452,19 +452,25 @@ class BaseVllmGenerationWorker:
         greedy: bool,
         stop_strings,
         max_new_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
     ):
         top_k_cfg = self.cfg["top_k"]
         top_k_val = 1 if greedy else (top_k_cfg if top_k_cfg is not None else -1)
 
-        temperature = 0.0 if greedy else self.cfg["temperature"]
+        resolved_temperature = 0.0 if greedy else (
+            temperature if temperature is not None else self.cfg["temperature"]
+        )
 
         max_tokens = (
             max_new_tokens if max_new_tokens is not None else self.cfg["max_new_tokens"]
         )
 
+        resolved_top_p = top_p if top_p is not None else self.cfg["top_p"]
+
         return self.SamplingParams(
-            temperature=temperature,
-            top_p=self.cfg["top_p"],
+            temperature=resolved_temperature,
+            top_p=resolved_top_p,
             top_k=top_k_val,
             max_tokens=max_tokens,
             logprobs=0,
@@ -550,9 +556,30 @@ class VllmGenerationWorker(BaseVllmGenerationWorker):
         input_lengths = data["input_lengths"]
         batch_stop_strings: list[list[str]] = data.get("stop_strings", [])
         stop_strings = self._merge_stop_strings(batch_stop_strings)
+
+        # Extract per-request sampling params from data dict (forwarded by
+        # TinkerCloud sampling_service via _tinker_-prefixed keys).
+        # Use first element since all samples in a shard share the same params.
+        # Fall back to config defaults when keys are absent.
+        per_request_max_new_tokens = None
+        per_request_temperature = None
+        per_request_top_p = None
+        batch_max_new_tokens = data.get("_tinker_max_new_tokens", [])
+        batch_temperature = data.get("_tinker_temperature", [])
+        batch_top_p = data.get("_tinker_top_p", [])
+        if batch_max_new_tokens:
+            per_request_max_new_tokens = int(batch_max_new_tokens[0])
+        if batch_temperature:
+            per_request_temperature = float(batch_temperature[0])
+        if batch_top_p:
+            per_request_top_p = float(batch_top_p[0])
+
         sampling_params = self._build_sampling_params(
             greedy=greedy,
             stop_strings=stop_strings,
+            max_new_tokens=per_request_max_new_tokens,
+            temperature=per_request_temperature,
+            top_p=per_request_top_p,
         )
 
         # verify inputs have correct padding

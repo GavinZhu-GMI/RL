@@ -615,6 +615,14 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
                 all_mb_metrics[k].extend(v)
         aggregated_results["all_mb_metrics"] = dict(all_mb_metrics)
 
+        # Concatenate per-sample logprobs from all DP workers.
+        # Workers are in rank order and sharding is contiguous, so
+        # simple concatenation preserves original batch order.
+        # Shape: [global_batch_size, seq_len-1]
+        worker_logprobs = [r["curr_logprobs"] for r in results if "curr_logprobs" in r]
+        if worker_logprobs:
+            aggregated_results["curr_logprobs"] = torch.cat(worker_logprobs, dim=0)
+
         return aggregated_results
 
     def generate(
