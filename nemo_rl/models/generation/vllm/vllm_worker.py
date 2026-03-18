@@ -454,6 +454,7 @@ class BaseVllmGenerationWorker:
         max_new_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
+        prompt_logprobs: Optional[int] = None,
     ):
         top_k_cfg = self.cfg["top_k"]
         top_k_val = 1 if greedy else (top_k_cfg if top_k_cfg is not None else -1)
@@ -468,7 +469,7 @@ class BaseVllmGenerationWorker:
 
         resolved_top_p = top_p if top_p is not None else self.cfg["top_p"]
 
-        return self.SamplingParams(
+        params = self.SamplingParams(
             temperature=resolved_temperature,
             top_p=resolved_top_p,
             top_k=top_k_val,
@@ -478,6 +479,9 @@ class BaseVllmGenerationWorker:
             stop=stop_strings,
             include_stop_str_in_output=True,
         )
+        if prompt_logprobs is not None:
+            params.prompt_logprobs = prompt_logprobs
+        return params
 
     def start_gpu_profiling(self) -> None:
         """Start GPU profiling."""
@@ -574,12 +578,19 @@ class VllmGenerationWorker(BaseVllmGenerationWorker):
         if batch_top_p:
             per_request_top_p = float(batch_top_p[0])
 
+        # Check if prompt logprobs were requested (forwarded by TinkerCloud)
+        batch_prompt_logprobs = data.get("_tinker_prompt_logprobs", [])
+        per_request_prompt_logprobs = None
+        if batch_prompt_logprobs and batch_prompt_logprobs[0]:
+            per_request_prompt_logprobs = 1
+
         sampling_params = self._build_sampling_params(
             greedy=greedy,
             stop_strings=stop_strings,
             max_new_tokens=per_request_max_new_tokens,
             temperature=per_request_temperature,
             top_p=per_request_top_p,
+            prompt_logprobs=per_request_prompt_logprobs,
         )
 
         # verify inputs have correct padding
@@ -630,6 +641,24 @@ class VllmGenerationWorker(BaseVllmGenerationWorker):
 
             output_ids_list.append(full_output)
             full_logprobs = torch.zeros(total_length, dtype=torch.float32)
+
+            # Extract prompt logprobs if requested and available
+            if per_request_prompt_logprobs and hasattr(output, "prompt_logprobs") and output.prompt_logprobs:
+                try:
+                    for idx, logprob_dict in enumerate(output.prompt_logprobs):
+                        if logprob_dict and idx < sequence_length:
+                            # Each dict maps token_id -> Logprob; take the actual token's logprob
+                            prompt_token_id = int(input_ids[i][idx])
+                            if prompt_token_id in logprob_dict:
+                                full_logprobs[idx] = logprob_dict[prompt_token_id].logprob
+                            else:
+                                # Fallback: take first entry
+                                full_logprobs[idx] = next(iter(logprob_dict.values())).logprob
+                except Exception:
+                    import traceback
+                    traceback.print_exc()
+
+            # Extract generation logprobs
             if hasattr(generation, "logprobs") and generation.logprobs:
                 try:
                     for idx, logprob_dict in enumerate(generation.logprobs):
