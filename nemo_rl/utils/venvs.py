@@ -14,6 +14,7 @@
 import logging
 import os
 import shlex
+import shutil
 import subprocess
 import time
 from functools import lru_cache
@@ -71,8 +72,6 @@ def create_local_venv(
     # Force rebuild if requested
     if force_rebuild and os.path.exists(venv_path):
         logger.info(f"Force rebuilding venv at {venv_path}")
-        import shutil
-
         shutil.rmtree(venv_path)
 
     logger.info(f"Creating new venv at {venv_path}")
@@ -95,7 +94,7 @@ def create_local_venv(
     exec_cmd.extend(["echo", f"Finished creating venv {venv_path}"])
 
     # Always run uv sync first to ensure the build requirements are set (for --no-build-isolation packages)
-    subprocess.run(["uv", "sync"], env=env, check=True)
+    subprocess.run(["uv", "sync", "--directory", git_root], env=env, check=True)
     subprocess.run(exec_cmd, env=env, check=True)
 
     # Return the path to the python executable in the virtual environment
