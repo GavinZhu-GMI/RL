@@ -14,8 +14,10 @@
 
 import copy
 import gc
+import math
 import os
 import sys
+import uuid
 from importlib.util import find_spec
 from typing import Any, Optional, cast
 
@@ -469,6 +471,10 @@ class BaseVllmGenerationWorker:
 
         resolved_top_p = top_p if top_p is not None else self.cfg["top_p"]
 
+        # Logprob-only requests skip detokenization (vLLM crashes decoding the
+        # -1 sentinel in prompt-logprob tensors) and thus cannot use stop
+        # strings; callers only need numbers, not text.
+        logprobs_only = prompt_logprobs is not None
         params = self.SamplingParams(
             temperature=resolved_temperature,
             top_p=resolved_top_p,
@@ -476,10 +482,11 @@ class BaseVllmGenerationWorker:
             max_tokens=max_tokens,
             logprobs=0,
             stop_token_ids=self.cfg["stop_token_ids"],
-            stop=stop_strings,
-            include_stop_str_in_output=True,
+            stop=None if logprobs_only else stop_strings,
+            include_stop_str_in_output=not logprobs_only,
+            detokenize=not logprobs_only,
         )
-        if prompt_logprobs is not None:
+        if logprobs_only:
             params.prompt_logprobs = prompt_logprobs
         return params
 
@@ -602,6 +609,13 @@ class VllmGenerationWorker(BaseVllmGenerationWorker):
         # Convert inputs to vLLM format
         prompts = format_prompt_for_vllm_generation(data)
 
+        # Prefix-cached blocks skip logprob computation (NaN); salt the cache
+        # so logprob requests always compute real values (BUG-013).
+        if per_request_prompt_logprobs:
+            salt = uuid.uuid4().hex
+            for j, p in enumerate(prompts):
+                p["cache_salt"] = f"{salt}-{j}"
+
         # Generate outputs
         assert self.llm is not None, (
             "Attempting to generate with either an uninitialized vLLM or non-model-owner"
@@ -650,10 +664,13 @@ class VllmGenerationWorker(BaseVllmGenerationWorker):
                             # Each dict maps token_id -> Logprob; take the actual token's logprob
                             prompt_token_id = int(input_ids[i][idx])
                             if prompt_token_id in logprob_dict:
-                                full_logprobs[idx] = logprob_dict[prompt_token_id].logprob
+                                lp_val = logprob_dict[prompt_token_id].logprob
                             else:
                                 # Fallback: take first entry
-                                full_logprobs[idx] = next(iter(logprob_dict.values())).logprob
+                                lp_val = next(iter(logprob_dict.values())).logprob
+                            # NaN/inf are not JSON-serializable downstream
+                            if math.isfinite(lp_val):
+                                full_logprobs[idx] = lp_val
                 except Exception:
                     import traceback
                     traceback.print_exc()
@@ -664,9 +681,9 @@ class VllmGenerationWorker(BaseVllmGenerationWorker):
                     for idx, logprob_dict in enumerate(generation.logprobs):
                         if logprob_dict:
                             position = sequence_length + idx
-                            full_logprobs[position] = next(iter(logprob_dict.items()))[
-                                1
-                            ].logprob
+                            lp_val = next(iter(logprob_dict.items()))[1].logprob
+                            if math.isfinite(lp_val):
+                                full_logprobs[position] = lp_val
                 except Exception:
                     import traceback
 
