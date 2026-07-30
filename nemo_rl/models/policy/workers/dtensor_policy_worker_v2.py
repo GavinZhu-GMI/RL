@@ -371,6 +371,7 @@ class DTensorPolicyWorkerV2(AbstractPolicyWorker, ColocatablePolicyInterface):
 
             losses = []
             all_mb_metrics = []
+            all_curr_logprobs = []
             for gb_idx in range(num_global_batches):
                 # Process global batch and compute normalization factors
                 gb_result = process_global_batch(
@@ -536,6 +537,9 @@ class DTensorPolicyWorkerV2(AbstractPolicyWorker, ColocatablePolicyInterface):
                         )
                         del logits
 
+                        # Separate per-sample tensor outputs from scalar metrics (T058)
+                        mb_curr_logprobs = loss_metrics.pop("_curr_logprobs", None)
+
                         # skip the update for dummy batches
                         if mb_idx < iterator_len:
                             ## scale by the number of global batches so we get the correct
@@ -550,6 +554,7 @@ class DTensorPolicyWorkerV2(AbstractPolicyWorker, ColocatablePolicyInterface):
                             loss_metrics["global_valid_toks"] = global_valid_toks.item()
                         else:
                             loss *= 0
+                            mb_curr_logprobs = None  # discard dummy batch logprobs
 
                         # Backward pass
                         if not eval_mode:
@@ -565,6 +570,8 @@ class DTensorPolicyWorkerV2(AbstractPolicyWorker, ColocatablePolicyInterface):
                     if num_valid_samples > 0:
                         mb_losses.append(loss.item())
                         all_mb_metrics.append(loss_metrics)
+                        if mb_curr_logprobs is not None:
+                            all_curr_logprobs.append(mb_curr_logprobs)
 
                 grad_norm: Optional[float | torch.Tensor] = None
                 if not eval_mode:
@@ -622,6 +629,11 @@ class DTensorPolicyWorkerV2(AbstractPolicyWorker, ColocatablePolicyInterface):
                 "model_dtype": self.dtype,
                 "all_mb_metrics": dict(mb_metrics),
             }
+
+            # Concatenate per-sample logprobs across microbatches (already on CPU).
+            # Shape: [local_batch_size, seq_len-1] — one entry per sample on this worker.
+            if all_curr_logprobs:
+                metrics["curr_logprobs"] = torch.cat(all_curr_logprobs, dim=0)
 
             return metrics
 
