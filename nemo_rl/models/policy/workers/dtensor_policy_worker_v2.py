@@ -632,7 +632,17 @@ class DTensorPolicyWorkerV2(AbstractPolicyWorker, ColocatablePolicyInterface):
 
             # Concatenate per-sample logprobs across microbatches (already on CPU).
             # Shape: [local_batch_size, seq_len-1] — one entry per sample on this worker.
+            # Dynamic batching trims each microbatch to its own width; right-pad to
+            # the shard's full width before concatenating (same convention as
+            # get_logprobs — pad 0.0, consumers slice by input_lengths). Rows are in
+            # the shard's (possibly length-sorted) order; lm_policy.train unsorts.
             if all_curr_logprobs:
+                width = data.get("input_ids").shape[1] - 1
+                all_curr_logprobs = [
+                    torch.nn.functional.pad(lp, (0, width - lp.shape[1]), value=0.0)
+                    if lp.shape[1] < width else lp
+                    for lp in all_curr_logprobs
+                ]
                 metrics["curr_logprobs"] = torch.cat(all_curr_logprobs, dim=0)
 
             return metrics

@@ -528,11 +528,12 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
         # Shard and replicate the batch
         dp_size = self.sharding_annotations.get_axis_size("data_parallel")
         with timer.time("policy_training/sharding_data") if timer else nullcontext():
+            train_unsorted_indices = None
             if self.use_dynamic_batches:
                 self.dynamic_batching_args["max_tokens_per_microbatch"] = self.cfg[
                     "dynamic_batching"
                 ]["train_mb_tokens"]
-                sharded_data, _ = data.shard_by_batch_size(
+                sharded_data, train_unsorted_indices = data.shard_by_batch_size(
                     dp_size,
                     batch_size=batch_size,
                     dynamic_batching_args=self.dynamic_batching_args,
@@ -541,7 +542,7 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
                 self.sequence_packing_args["max_tokens_per_microbatch"] = self.cfg[
                     "sequence_packing"
                 ]["train_mb_tokens"]
-                sharded_data, _ = data.shard_by_batch_size(
+                sharded_data, train_unsorted_indices = data.shard_by_batch_size(
                     dp_size,
                     batch_size=batch_size,
                     sequence_packing_args=self.sequence_packing_args,
@@ -617,11 +618,21 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
 
         # Concatenate per-sample logprobs from all DP workers.
         # Workers are in rank order and sharding is contiguous, so
-        # simple concatenation preserves original batch order.
+        # simple concatenation preserves original batch order — except under
+        # dynamic batching / sequence packing, which sort by length for load
+        # balancing; invert that with the shard call's unsort indices (the
+        # same convention reorder_data applies for get_logprobs).
         # Shape: [global_batch_size, seq_len-1]
         worker_logprobs = [r["curr_logprobs"] for r in results if "curr_logprobs" in r]
         if worker_logprobs:
-            aggregated_results["curr_logprobs"] = torch.cat(worker_logprobs, dim=0)
+            curr_logprobs = torch.cat(worker_logprobs, dim=0)
+            if train_unsorted_indices is not None:
+                order = sorted(
+                    range(len(train_unsorted_indices)),
+                    key=lambda i: train_unsorted_indices[i],
+                )
+                curr_logprobs = curr_logprobs[order]
+            aggregated_results["curr_logprobs"] = curr_logprobs
 
         return aggregated_results
 
