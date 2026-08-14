@@ -22,6 +22,33 @@ from nemo_rl.models.policy.interfaces import ReferenceLogprobOutputSpec
 from nemo_rl.utils.nsys import wrap_with_nvtx_name
 
 
+def maybe_seed_from_config(config: Any, where: str) -> None:
+    """Seed python/numpy/torch from ``config["seed"]``, if the caller set one.
+
+    Policy workers build the model -- and draw the PEFT adapter's initializer
+    -- inside their own process, under torch's process-global RNG. Nothing
+    seeds it: ``set_seed`` is called by the algorithm entry points
+    (grpo/sft/dpo), so a driver that uses ``Policy`` directly in push mode
+    never reaches them. Two policies created with the same declared seed then
+    start from different weights, with nothing in the API to say so.
+
+    Call this from a worker's ``__init__`` before any model construction.
+    ``AbstractPolicyWorker`` deliberately has no ``__init__`` -- the concrete
+    workers do not chain to a base constructor -- so this is a free function
+    that each calls explicitly rather than inherited behaviour.
+
+    A config with no ``seed`` key leaves RNG state untouched, so the default
+    path is unchanged.
+    """
+    seed = config.get("seed") if hasattr(config, "get") else None
+    if seed is None:
+        return
+    from nemo_rl.algorithms.utils import set_seed
+
+    set_seed(int(seed))
+    print(f"[nemo-rl] {where} seeded with {seed}", flush=True)
+
+
 class AbstractPolicyWorker:
     """Base class for policy workers with shared functionality."""
 

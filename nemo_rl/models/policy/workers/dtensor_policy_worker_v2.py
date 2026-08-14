@@ -67,7 +67,7 @@ from nemo_rl.models.policy.interfaces import (
 from nemo_rl.models.policy.utils import (
     get_runtime_env_for_policy_worker,
 )
-from nemo_rl.models.policy.workers.base_policy_worker import AbstractPolicyWorker
+from nemo_rl.models.policy.workers.base_policy_worker import AbstractPolicyWorker, maybe_seed_from_config
 from nemo_rl.models.policy.workers.patches import (
     apply_torch_aten_alias_tensor_patch,
     apply_transformer_engine_patch,
@@ -223,6 +223,10 @@ class DTensorPolicyWorkerV2(AbstractPolicyWorker, ColocatablePolicyInterface):
         apply_torch_aten_alias_tensor_patch()
 
         # Store configuration and tokenizer/processor
+        # Seed before ANY model construction: the adapter initializer is
+        # drawn here, in this process, under torch's global RNG.
+        maybe_seed_from_config(config, "DTensorPolicyWorkerV2")
+
         self.cfg = config
         self.tokenizer = tokenizer
         self.processor = processor

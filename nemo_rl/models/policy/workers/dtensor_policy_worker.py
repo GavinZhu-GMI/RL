@@ -75,7 +75,7 @@ from nemo_rl.models.policy.utils import (
     get_runtime_env_for_policy_worker,
     resolve_model_class,
 )
-from nemo_rl.models.policy.workers.base_policy_worker import AbstractPolicyWorker
+from nemo_rl.models.policy.workers.base_policy_worker import AbstractPolicyWorker, maybe_seed_from_config
 from nemo_rl.models.policy.workers.patches import apply_torch_aten_alias_tensor_patch
 from nemo_rl.utils.native_checkpoint import (
     load_checkpoint,
@@ -180,6 +180,10 @@ class DTensorPolicyWorker(AbstractPolicyWorker, ColocatablePolicyInterface):
         # Disable dynamo autotune_local_cache to avoid crash when there's already a cache
         # with different order of node_bundles
         configure_dynamo_cache()
+
+        # Seed before ANY model construction: the adapter initializer is
+        # drawn here, in this process, under torch's global RNG.
+        maybe_seed_from_config(config, "DTensorPolicyWorker")
 
         self.cfg = config
         # torch distributed init. Envars for rank, world_size, and master_addr and master_port are set from the ray remote call
