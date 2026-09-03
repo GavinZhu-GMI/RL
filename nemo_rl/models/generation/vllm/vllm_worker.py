@@ -457,9 +457,15 @@ class BaseVllmGenerationWorker:
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         prompt_logprobs: Optional[int] = None,
+        top_k: Optional[int] = None,
+        seed: Optional[int] = None,
+        stop_token_ids=None,
     ):
-        top_k_cfg = self.cfg["top_k"]
+        top_k_cfg = top_k if top_k is not None and top_k > 0 else self.cfg["top_k"]
         top_k_val = 1 if greedy else (top_k_cfg if top_k_cfg is not None else -1)
+        merged_stop_ids = set(self.cfg["stop_token_ids"] or [])
+        if stop_token_ids:
+            merged_stop_ids.update(int(t) for t in stop_token_ids)
 
         resolved_temperature = 0.0 if greedy else (
             temperature if temperature is not None else self.cfg["temperature"]
@@ -481,13 +487,52 @@ class BaseVllmGenerationWorker:
             top_k=top_k_val,
             max_tokens=max_tokens,
             logprobs=0,
-            stop_token_ids=self.cfg["stop_token_ids"],
+            stop_token_ids=sorted(merged_stop_ids) if merged_stop_ids else None,
             stop=None if logprobs_only else stop_strings,
             include_stop_str_in_output=not logprobs_only,
             detokenize=not logprobs_only,
+            seed=seed,
         )
         if logprobs_only:
             params.prompt_logprobs = prompt_logprobs
+        return params
+
+    def _per_row_sampling_params(self, data, n_rows: int, greedy: bool):
+        """Build one SamplingParams per row from per-row columns.
+
+        Rows may carry `_tinker_*` columns (max_new_tokens, temperature, top_p,
+        top_k, seed, stop_token_ids, prompt_logprobs) and/or per-row
+        `stop_strings`. Returns None when no per-row column is present.
+        """
+        def col(name):
+            v = data.get(name)
+            return v if v is not None and len(v) == n_rows else None
+        cols = {k: col(k) for k in (
+            "_tinker_max_new_tokens", "_tinker_temperature", "_tinker_top_p",
+            "_tinker_top_k", "_tinker_seed", "_tinker_stop_token_ids",
+            "_tinker_prompt_logprobs", "stop_strings",
+        )}
+        if not any(v is not None for v in cols.values()):
+            return None
+        def at(name, i, cast=None):
+            v = cols[name]
+            if v is None or v[i] is None:
+                return None
+            return cast(v[i]) if cast else v[i]
+        params = []
+        for i in range(n_rows):
+            row_stop = cols["stop_strings"][i] if cols["stop_strings"] is not None else None
+            params.append(self._build_sampling_params(
+                greedy=greedy,
+                stop_strings=self._merge_stop_strings([row_stop] if row_stop else None),
+                max_new_tokens=at("_tinker_max_new_tokens", i, int),
+                temperature=at("_tinker_temperature", i, float),
+                top_p=at("_tinker_top_p", i, float),
+                prompt_logprobs=1 if at("_tinker_prompt_logprobs", i) else None,
+                top_k=at("_tinker_top_k", i, int),
+                seed=at("_tinker_seed", i, int),
+                stop_token_ids=at("_tinker_stop_token_ids", i),
+            ))
         return params
 
     def start_gpu_profiling(self) -> None:
@@ -565,40 +610,19 @@ class VllmGenerationWorker(BaseVllmGenerationWorker):
 
         input_ids = data["input_ids"]
         input_lengths = data["input_lengths"]
-        batch_stop_strings: list[list[str]] = data.get("stop_strings", [])
-        stop_strings = self._merge_stop_strings(batch_stop_strings)
+        n_rows = input_ids.size(0)
 
-        # Extract per-request sampling params from data dict (forwarded by
-        # TinkerCloud sampling_service via _tinker_-prefixed keys).
-        # Use first element since all samples in a shard share the same params.
-        # Fall back to config defaults when keys are absent.
-        per_request_max_new_tokens = None
-        per_request_temperature = None
-        per_request_top_p = None
-        batch_max_new_tokens = data.get("_tinker_max_new_tokens", [])
-        batch_temperature = data.get("_tinker_temperature", [])
-        batch_top_p = data.get("_tinker_top_p", [])
-        if batch_max_new_tokens:
-            per_request_max_new_tokens = int(batch_max_new_tokens[0])
-        if batch_temperature:
-            per_request_temperature = float(batch_temperature[0])
-        if batch_top_p:
-            per_request_top_p = float(batch_top_p[0])
-
-        # Check if prompt logprobs were requested (forwarded by TinkerCloud)
-        batch_prompt_logprobs = data.get("_tinker_prompt_logprobs", [])
-        per_request_prompt_logprobs = None
-        if batch_prompt_logprobs and batch_prompt_logprobs[0]:
-            per_request_prompt_logprobs = 1
-
-        sampling_params = self._build_sampling_params(
-            greedy=greedy,
-            stop_strings=stop_strings,
-            max_new_tokens=per_request_max_new_tokens,
-            temperature=per_request_temperature,
-            top_p=per_request_top_p,
-            prompt_logprobs=per_request_prompt_logprobs,
-        )
+        # Per-row sampling params (forwarded as `_tinker_*` columns and per-row
+        # `stop_strings`); a batch without them uses the config defaults.
+        batch_prompt_logprobs = data.get("_tinker_prompt_logprobs", []) or []
+        per_request_prompt_logprobs = 1 if any(batch_prompt_logprobs) else None
+        sampling_params = self._per_row_sampling_params(data, n_rows, greedy)
+        if sampling_params is None:
+            sampling_params = self._build_sampling_params(
+                greedy=greedy,
+                stop_strings=self._merge_stop_strings(data.get("stop_strings", [])),
+                prompt_logprobs=per_request_prompt_logprobs,
+            )
 
         # verify inputs have correct padding
         verify_right_padding(data, pad_value=self.cfg["_pad_token_id"])
@@ -657,7 +681,10 @@ class VllmGenerationWorker(BaseVllmGenerationWorker):
             full_logprobs = torch.zeros(total_length, dtype=torch.float32)
 
             # Extract prompt logprobs if requested and available
-            if per_request_prompt_logprobs and hasattr(output, "prompt_logprobs") and output.prompt_logprobs:
+            row_wants_prompt_logprobs = (
+                bool(batch_prompt_logprobs[i]) if i < len(batch_prompt_logprobs) else bool(per_request_prompt_logprobs)
+            )
+            if row_wants_prompt_logprobs and hasattr(output, "prompt_logprobs") and output.prompt_logprobs:
                 try:
                     for idx, logprob_dict in enumerate(output.prompt_logprobs):
                         if logprob_dict and idx < sequence_length:
