@@ -17,6 +17,7 @@ This module provides a wrapper class around the nemo_automodel Checkpointer
 for saving and loading model checkpoints in DTensor-based policy workers.
 """
 
+import contextlib
 import os
 from typing import Any, Optional
 
@@ -243,6 +244,26 @@ class AutomodelCheckpointManager:
             load_base_model=True,
         )
 
+    @contextlib.contextmanager
+    def _optimizer_via_dcp(self):
+        """Route optimizer state through DCP regardless of the PEFT flag.
+
+        The Automodel checkpointer tells model saves from optimizer saves by
+        whether "/model" occurs in the path, and with is_peft it writes the
+        former as a single adapter_model.safetensors. An optimizer state dict
+        is nested and cannot be a safetensors file, and any checkpoint root
+        containing "/model" in a directory name (e.g. a model_<id> run dir)
+        sends it down that branch. Optimizer state is never PEFT-shaped, so
+        is_peft is switched off for the duration of the optimizer save/load.
+        """
+        config = self.checkpointer.config
+        was_peft = config.is_peft
+        config.is_peft = False
+        try:
+            yield
+        finally:
+            config.is_peft = was_peft
+
     def save_checkpoint(
         self,
         model: nn.Module,
@@ -317,12 +338,13 @@ class AutomodelCheckpointManager:
         )
 
         if optimizer_path and optimizer is not None:
-            self.checkpointer.save_optimizer(
-                optimizer=optimizer,
-                model=model,
-                weights_path=optimizer_path,
-                scheduler=scheduler,
-            )
+            with self._optimizer_via_dcp():
+                self.checkpointer.save_optimizer(
+                    optimizer=optimizer,
+                    model=model,
+                    weights_path=optimizer_path,
+                    scheduler=scheduler,
+                )
 
         if tokenizer_path and tokenizer is not None:
             print(f"Saving tokenizer (or processor) to {tokenizer_path}")
@@ -382,12 +404,13 @@ class AutomodelCheckpointManager:
         )
 
         if optimizer_path and optimizer is not None:
-            self.checkpointer.load_optimizer(
-                optimizer=optimizer,
-                model=model,
-                weights_path=optimizer_path,
-                scheduler=scheduler,
-            )
+            with self._optimizer_via_dcp():
+                self.checkpointer.load_optimizer(
+                    optimizer=optimizer,
+                    model=model,
+                    weights_path=optimizer_path,
+                    scheduler=scheduler,
+                )
 
 
 def detect_checkpoint_format(weights_path: str) -> tuple[str, bool]:
