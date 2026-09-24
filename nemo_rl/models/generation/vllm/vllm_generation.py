@@ -601,46 +601,53 @@ class VllmGeneration(GenerationInterface):
             os.environ.get("NRL_VLLM_ASYNC_TIMEOUT_SECONDS", "600")
         )  # Default 10 minutes
 
-        while not finished:
-            try:
-                msg_type, item = await asyncio.wait_for(
-                    result_queue.get(), timeout=timeout_seconds
-                )
-            except asyncio.TimeoutError:
-                print(
-                    f"Timeout waiting for results after {timeout_seconds}s. Worker has not finished."
-                )
-                print(
-                    f"For longer sequences, increase the timeout by setting: export NRL_VLLM_ASYNC_TIMEOUT_SECONDS={int(timeout_seconds * 2)}"
-                )
-                # Cancel the task
-                if not worker_task.done():
-                    worker_task.cancel()
-                await asyncio.gather(worker_task, return_exceptions=True)
-                raise RuntimeError(
-                    f"Timeout waiting for worker results after {timeout_seconds}s. "
-                    f"For longer sequences, increase timeout by setting: export NRL_VLLM_ASYNC_TIMEOUT_SECONDS={int(timeout_seconds * 2)}"
-                )
+        try:
+            while not finished:
+                try:
+                    msg_type, item = await asyncio.wait_for(
+                        result_queue.get(), timeout=timeout_seconds
+                    )
+                except asyncio.TimeoutError:
+                    print(
+                        f"Timeout waiting for results after {timeout_seconds}s. Worker has not finished."
+                    )
+                    print(
+                        f"For longer sequences, increase the timeout by setting: export NRL_VLLM_ASYNC_TIMEOUT_SECONDS={int(timeout_seconds * 2)}"
+                    )
+                    # Cancel the task
+                    if not worker_task.done():
+                        worker_task.cancel()
+                    await asyncio.gather(worker_task, return_exceptions=True)
+                    raise RuntimeError(
+                        f"Timeout waiting for worker results after {timeout_seconds}s. "
+                        f"For longer sequences, increase timeout by setting: export NRL_VLLM_ASYNC_TIMEOUT_SECONDS={int(timeout_seconds * 2)}"
+                    )
 
-            if msg_type == "sample":
-                # Yield individual sample result immediately
-                yield item
-            elif msg_type == "error":
-                # Cancel the task and propagate error
-                if not worker_task.done():
-                    worker_task.cancel()
-                await asyncio.gather(worker_task, return_exceptions=True)
-                raise item
-            elif msg_type == "worker_done":
-                # Worker finished, just continue the loop
-                pass
-            else:
-                raise RuntimeError(f"Unexpected message type: {msg_type}")
+                if msg_type == "sample":
+                    # Yield individual sample result immediately
+                    yield item
+                elif msg_type == "error":
+                    # Cancel the task and propagate error
+                    if not worker_task.done():
+                        worker_task.cancel()
+                    await asyncio.gather(worker_task, return_exceptions=True)
+                    raise item
+                elif msg_type == "worker_done":
+                    # Worker finished, just continue the loop
+                    pass
+                else:
+                    raise RuntimeError(f"Unexpected message type: {msg_type}")
 
-        # Verify the task is actually done
-        assert worker_task.done(), (
-            f"Worker task {leader_worker_idx} should be done but isn't"
-        )
+            # Normal completion; worker errors were routed through the queue.
+            await worker_task
+        finally:
+            if not worker_task.done():
+                # The consumer stopped early (cancelled, or closed this
+                # generator): cancel the worker's streaming task so its
+                # in-flight vLLM requests are aborted instead of decoding on.
+                ray.cancel(worker_gen_proxy, force=False)
+                worker_task.cancel()
+                await asyncio.gather(worker_task, return_exceptions=True)
 
     async def generate_text_async(
         self, data: BatchedDataDict[GenerationDatumSpec], greedy: bool = False
@@ -687,6 +694,44 @@ class VllmGeneration(GenerationInterface):
             data, "generate_async", validate_generate_data, greedy
         ):
             yield result
+
+    async def generate_rows_async(
+        self, data: BatchedDataDict[GenerationDatumSpec], greedy: bool = False
+    ) -> list[tuple[int, BatchedDataDict[GenerationOutputSpec]]]:
+        """Generate the batch's rows on the next DP leader and return them all.
+
+        Unlike generate_async this is a plain actor task, not a streaming
+        generator, so it also works for a Ray Client driver. Cancelling the
+        awaiting task cancels the worker task, which aborts the rows' vLLM
+        requests. Rows are (original_idx, result) in completion order.
+        """
+        if not self.cfg["vllm_cfg"]["async_engine"]:
+            raise RuntimeError(
+                "generate_rows_async can only be used when async_engine is enabled in vLLM config."
+            )
+        assert isinstance(data, BatchedDataDict), (
+            f"data must be a BatchedDataDict, got type: {type(data)}"
+        )
+        leader_worker_idx = self.worker_group.get_dp_leader_worker_idx(
+            self.current_generate_dp_shard_idx
+        )
+        self.current_generate_dp_shard_idx += 1
+        self.current_generate_dp_shard_idx %= self.worker_group.dp_size
+
+        ref = self.worker_group.run_single_worker_single_data(
+            method_name="generate_rows_async",
+            worker_idx=leader_worker_idx,
+            data=data,
+            greedy=greedy,
+        )
+        try:
+            rows = await asyncio.wrap_future(ref.future())
+        except asyncio.CancelledError:
+            ray.cancel(ref, force=False)
+            raise
+        for _, result_batch in rows:
+            result_batch["gen_leader_worker_idx"] = [int(leader_worker_idx)]
+        return rows
 
     def prepare_for_generation(self, *args: Any, **kwargs: Any) -> bool:
         """Wake workers up for colocated inference."""

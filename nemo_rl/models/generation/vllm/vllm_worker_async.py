@@ -15,6 +15,7 @@
 import asyncio
 import copy
 import gc
+import math
 import threading
 import time
 import uuid
@@ -670,15 +671,16 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
         input_lengths_batch = data["input_lengths"]
         batch_size = input_ids_batch.shape[0]
 
-        # Ensure generate_async only receives single samples (batch_size = 1)
-        assert batch_size == 1, (
-            f"generate_async is restricted to handle only single samples, "
-            f"but received batch_size={batch_size}. Please handle batching outside this method."
-        )
+        # The driver's streaming generate_async sends one row per call;
+        # generate_rows_async sends a request's rows together. Each row is its
+        # own task and its own vLLM request either way.
 
         batch_specific_stop_strings_list = data.get(
             "stop_strings", [[] for _ in range(batch_size)]
         )
+        # One SamplingParams per row from the `_tinker_*` columns and per-row
+        # stop strings; None when the batch carries none (config defaults).
+        per_row_params = self._per_row_sampling_params(data, batch_size, greedy)
 
         # Create tasks for each sample in the batch
         async def process_single_sample(sample_idx):
@@ -699,7 +701,12 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
             remaining_ctx = (
                 self.cfg["vllm_cfg"]["max_model_len"] - current_input_actual_length
             )
-            allowed_new_tokens = max(0, min(self.cfg["max_new_tokens"], remaining_ctx))
+            requested_new_tokens = (
+                per_row_params[sample_idx].max_tokens
+                if per_row_params is not None
+                else self.cfg["max_new_tokens"]
+            )
+            allowed_new_tokens = max(0, min(requested_new_tokens, remaining_ctx))
 
             # Handle case where no tokens can be generated due to length constraints
             if allowed_new_tokens == 0:
@@ -738,11 +745,15 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
 
                 return (sample_idx, result_batch)
 
-            sampling_params_for_request = self._build_sampling_params(
-                greedy=greedy,
-                stop_strings=final_stop_strings_for_sample,
-                max_new_tokens=allowed_new_tokens,
-            )
+            if per_row_params is not None:
+                sampling_params_for_request = per_row_params[sample_idx]
+                sampling_params_for_request.max_tokens = allowed_new_tokens
+            else:
+                sampling_params_for_request = self._build_sampling_params(
+                    greedy=greedy,
+                    stop_strings=final_stop_strings_for_sample,
+                    max_new_tokens=allowed_new_tokens,
+                )
 
             request_id = str(uuid.uuid4())
 
@@ -753,10 +764,15 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
                 request_id=request_id,
             )
 
-            # Get the final result from the generator
+            # Get the final result from the generator. Closing the generator
+            # (this task cancelled, or the caller stopped consuming) makes
+            # AsyncLLM abort the request, freeing its KV blocks and decode slot.
             final_request_output = None
-            async for req_output in vllm_request_generator:
-                final_request_output = req_output
+            try:
+                async for req_output in vllm_request_generator:
+                    final_request_output = req_output
+            finally:
+                await vllm_request_generator.aclose()
 
             if final_request_output is None:
                 raise RuntimeError(f"No output received for request {request_id}")
@@ -817,6 +833,22 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
                                     logprob_value
                                 )
 
+            # Prompt logprobs for a row that asked for them (logprobs-only
+            # requests): the prompt token's own logprob at each position.
+            if (
+                sampling_params_for_request.prompt_logprobs is not None
+                and final_request_output.prompt_logprobs
+            ):
+                for idx, logprob_dict in enumerate(final_request_output.prompt_logprobs):
+                    if not logprob_dict or idx >= current_input_actual_length:
+                        continue
+                    prompt_token_id = int(original_input_ids_single_row[idx])
+                    entry = logprob_dict.get(prompt_token_id)
+                    if entry is None:
+                        entry = next(iter(logprob_dict.values()))
+                    if math.isfinite(entry.logprob):
+                        logprobs_single_item[0, idx] = entry.logprob
+
             # Generation lengths
             generation_lengths_tensor = torch.tensor(
                 [num_generated_tokens],
@@ -848,18 +880,33 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
             asyncio.create_task(process_single_sample(i)) for i in range(batch_size)
         ]
 
-        # Yield results as they become available
-        for completed_task in asyncio.as_completed(sample_tasks):
-            try:
-                result = await completed_task
-                yield result
-            except Exception as e:
-                # Cancel remaining tasks
-                for task in sample_tasks:
-                    if not task.done():
-                        task.cancel()
-                await asyncio.gather(*sample_tasks, return_exceptions=True)
-                raise e
+        # Yield results as they become available. The finally also runs when
+        # this task is cancelled (ray.cancel from the driver) or the consumer
+        # closes the generator: no row outlives the call.
+        try:
+            for completed_task in asyncio.as_completed(sample_tasks):
+                yield await completed_task
+        finally:
+            pending = [task for task in sample_tasks if not task.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+    async def generate_rows_async(
+        self, data: BatchedDataDict[GenerationDatumSpec], greedy: bool = False
+    ) -> list[tuple[int, BatchedDataDict[GenerationOutputSpec]]]:
+        """generate_async over the batch, returned as a list instead of streamed.
+
+        Ray Client cannot iterate a streaming generator, but it can await and
+        ray.cancel a plain actor task; cancelling this task closes the
+        generator, which aborts every row's vLLM request.
+        """
+        generator = self.generate_async(data, greedy)
+        try:
+            return [result async for result in generator]
+        finally:
+            await generator.aclose()
 
     async def generate_text_async(
         self, data: BatchedDataDict[GenerationDatumSpec], greedy: bool = False
