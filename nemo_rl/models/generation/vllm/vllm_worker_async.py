@@ -143,6 +143,34 @@ Template repr (detokenized): {repr(tokenizer.decode(template_token_ids))}"""
     )
 
 
+def register_generate_tokens_route(app: FastAPI, serving_tokens) -> None:
+    """Mount vLLM's token-in/token-out route, /inference/v1/generate, on the
+    worker's HTTP app. The request carries the full SamplingParams; a client
+    disconnect cancels the handler (with_cancellation), which aborts the
+    engine request. Same handler shape as vllm.entrypoints.openai.api_server.
+    """
+    from fastapi import Request
+    from fastapi.responses import JSONResponse, StreamingResponse
+    from vllm.entrypoints.openai.protocol import (
+        ErrorResponse,
+        GenerateRequest,
+        GenerateResponse,
+    )
+    from vllm.entrypoints.utils import with_cancellation
+
+    @app.post("/inference/v1/generate")
+    @with_cancellation
+    async def generate_tokens(request: GenerateRequest, raw_request: Request):
+        result = await serving_tokens.serve_tokens(request, raw_request)
+        if isinstance(result, ErrorResponse):
+            return JSONResponse(
+                content=result.model_dump(), status_code=result.error.code
+            )
+        if isinstance(result, GenerateResponse):
+            return JSONResponse(content=result.model_dump())
+        return StreamingResponse(content=result, media_type="text/event-stream")
+
+
 @ray.remote(
     runtime_env={**get_nsight_config_if_pattern_matches("vllm_async_generation_worker")}
 )  # pragma: no cover
@@ -472,6 +500,13 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
             )
         )
         openai_serving_chat = NeMoRLOpenAIServingChat(**serving_chat_kwargs)
+
+        from vllm.entrypoints.openai.serving_tokens import ServingTokens
+
+        register_generate_tokens_route(
+            app,
+            ServingTokens(engine_client, openai_serving_models, request_logger=None),
+        )
 
         generation_config = self.cfg
 
