@@ -507,6 +507,11 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
             app,
             ServingTokens(engine_client, openai_serving_models, request_logger=None),
         )
+        from nemo_rl.models.generation.vllm.tinkercloud_routes import (
+            register_tinkercloud_routes,
+        )
+
+        register_tinkercloud_routes(app, engine_client)
 
         generation_config = self.cfg
 
