@@ -27,10 +27,19 @@ msgspec on both sides of the wire. A client disconnect cancels the handler
 last RequestOutput and so forces output_kind=FINAL_ONLY, the only kind that
 carries every child of an n > 1 request in it.
 
+/tinkercloud/v1/update_weights_from_collective and /tinkercloud/v1/reset_prefix_cache
+drive the non-colocated refit from the same app. The worker's Ray methods for
+these run on the actor's event loop in another thread, while the generate route
+runs on uvicorn's; both reach the engine core over one ZMQ socket, which is not
+thread-safe, and a collision corrupts a frame and kills the core's input reader.
+Serving the refit here puts every engine-core call on one loop, the shape
+SkyRL's server uses.
+
 Kept in its own module so the fork's only in-tree touch is the registration
 call in the worker's app setup.
 """
 
+import asyncio
 import math
 from typing import Any, Optional
 
@@ -70,6 +79,10 @@ class GenerateResponse(msgspec.Struct):
 
 class ErrorBody(msgspec.Struct):
     error: str
+
+
+class OkBody(msgspec.Struct):
+    ok: bool
 
 
 def _floored(logprob: float) -> float:
@@ -156,5 +169,29 @@ def register_tinkercloud_routes(app: FastAPI, engine_client) -> None:
                     prompt_logprobs=prompt_logprobs,
                 )
             ),
+            media_type="application/json",
+        )
+
+    @app.post("/tinkercloud/v1/update_weights_from_collective")
+    async def update_weights_from_collective():
+        """Receive the trainer's NCCL broadcast into the engine's weights. The
+        trainer must be broadcasting concurrently; in-flight sequences keep
+        their KV and continue on the new weights."""
+        results = await engine_client.collective_rpc("update_weights_from_collective")
+        if asyncio.iscoroutine(results):
+            results = await results
+        return Response(
+            msgspec.json.encode(OkBody(ok=bool(results[0]))),
+            media_type="application/json",
+        )
+
+    @app.post("/tinkercloud/v1/reset_prefix_cache")
+    async def reset_prefix_cache():
+        """Drop prefix-cache blocks no request references; blocks in use stay
+        (vLLM logs it), so the caller's per-version cache salt is what keeps a
+        new request off blocks computed by older weights."""
+        await engine_client.reset_prefix_cache()
+        return Response(
+            msgspec.json.encode(OkBody(ok=True)),
             media_type="application/json",
         )
