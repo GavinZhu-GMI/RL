@@ -37,6 +37,16 @@ from nemo_rl.models.generation.vllm.tinkercloud_routes import (  # noqa: E402
 class FakeEngine:
     def __init__(self):
         self.calls = []
+        self.rpcs = []
+        self.resets = 0
+        self.update_ok = True
+
+    async def collective_rpc(self, method, args=(), kwargs=None):
+        self.rpcs.append(method)
+        return [self.update_ok]
+
+    async def reset_prefix_cache(self):
+        self.resets += 1
 
     async def generate(self, prompt, params, request_id):
         self.calls.append((prompt, params))
@@ -134,3 +144,14 @@ def test_invalid_requests_are_rejected_before_the_engine_and_engine_errors_are_4
         json={"token_ids": [999], "sampling_params": {"max_tokens": 1}},
     )
     assert r.status_code == 400 and "prompt too long" in r.json()["error"]
+
+
+def test_weight_sync_routes_drive_the_engine_from_the_app():
+    client, engine = make_client()
+    r = client.post("/tinkercloud/v1/update_weights_from_collective")
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    assert engine.rpcs == ["update_weights_from_collective"]
+    engine.update_ok = False
+    assert client.post("/tinkercloud/v1/update_weights_from_collective").json() == {"ok": False}
+    r = client.post("/tinkercloud/v1/reset_prefix_cache")
+    assert r.status_code == 200 and r.json() == {"ok": True} and engine.resets == 1
