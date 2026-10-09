@@ -21,8 +21,13 @@ worker serialises its responses back to back, ~2 s per 130k tokens at any model
 size. Here a choice carries token_ids, finish_reason and logprobs as
 {"content": [{"logprob": x}, ...]} (the sampled token's logprob, floored to
 CLAMPED_LOGPROB where vLLM has no finite value, the shape SkyRL's own generate
-route uses); prompt_logprobs is a flat list with None at position 0. Encoding is
-msgspec on both sides of the wire. A client disconnect cancels the handler
+route uses); prompt_logprobs is a flat list with None at position 0. When the
+request asks topk_sample_logprobs=k > 0 (with sampling_params.logprobs >= k) each
+entry also carries top_logprobs, the k most likely tokens of that position best
+first as [{"token", "logprob"}]; topk_prompt_logprobs=k > 0 (with
+sampling_params.prompt_logprobs >= k) adds prompt_top_logprobs, one such list per
+prompt position and None at position 0. At k=0 neither key is emitted, so the
+flat shape is unchanged. Encoding is msgspec on both sides of the wire. A client disconnect cancels the handler
 (with_cancellation), which aborts the engine request. The route answers from the
 last RequestOutput and so forces output_kind=FINAL_ONLY, the only kind that
 carries every child of an n > 1 request in it.
@@ -54,10 +59,19 @@ class GenerateRequest(msgspec.Struct):
     token_ids: list[int]
     sampling_params: dict[str, Any] = {}
     cache_salt: Optional[str] = None
+    # top-k entries to emit per sampled / prompt position; 0 = none
+    topk_sample_logprobs: int = 0
+    topk_prompt_logprobs: int = 0
 
 
-class LogprobEntry(msgspec.Struct):
+class TopLogprob(msgspec.Struct):
+    token: int
     logprob: float
+
+
+class LogprobEntry(msgspec.Struct, omit_defaults=True):
+    logprob: float
+    top_logprobs: Optional[list[TopLogprob]] = None
 
 
 class Logprobs(msgspec.Struct):
@@ -71,10 +85,11 @@ class Choice(msgspec.Struct):
     logprobs: Optional[Logprobs]
 
 
-class GenerateResponse(msgspec.Struct):
+class GenerateResponse(msgspec.Struct, omit_defaults=True):
     request_id: str
     choices: list[Choice]
     prompt_logprobs: Optional[list[Optional[float]]]
+    prompt_top_logprobs: Optional[list[Optional[list[TopLogprob]]]] = None
 
 
 class ErrorBody(msgspec.Struct):
@@ -87,6 +102,13 @@ class OkBody(msgspec.Struct):
 
 def _floored(logprob: float) -> float:
     return logprob if math.isfinite(logprob) else CLAMPED_LOGPROB
+
+
+def _top_k(position: dict, k: int) -> list[TopLogprob]:
+    """The k most likely tokens of one position, best first. vLLM's dict holds
+    the top-k plus, when outside them, the sampled (or prompt) token itself."""
+    ranked = sorted(position.items(), key=lambda kv: kv[1].logprob, reverse=True)
+    return [TopLogprob(token=t, logprob=_floored(lp.logprob)) for t, lp in ranked[:k]]
 
 
 def _error(status: int, message: str) -> Response:
@@ -118,6 +140,13 @@ def register_tinkercloud_routes(app: FastAPI, engine_client) -> None:
             ValueError,
         ) as e:
             return _error(422, f"invalid generate request: {e}")
+        k_sample, k_prompt = req.topk_sample_logprobs, req.topk_prompt_logprobs
+        if k_sample < 0 or k_prompt < 0:
+            return _error(422, "topk_sample_logprobs and topk_prompt_logprobs must be >= 0")
+        if k_sample > (params.logprobs or 0):
+            return _error(422, "topk_sample_logprobs exceeds sampling_params.logprobs")
+        if k_prompt > (params.prompt_logprobs or 0):
+            return _error(422, "topk_prompt_logprobs exceeds sampling_params.prompt_logprobs")
         params.output_kind = RequestOutputKind.FINAL_ONLY
         prompt = TokensPrompt(prompt_token_ids=req.token_ids)
         if req.cache_salt is not None:
@@ -143,7 +172,10 @@ def register_tinkercloud_routes(app: FastAPI, engine_client) -> None:
                 # the sampled token is always present in its position's dict
                 logprobs = Logprobs(
                     content=[
-                        LogprobEntry(logprob=_floored(out.logprobs[i][t].logprob))
+                        LogprobEntry(
+                            logprob=_floored(out.logprobs[i][t].logprob),
+                            top_logprobs=_top_k(out.logprobs[i], k_sample) if k_sample else None,
+                        )
                         for i, t in enumerate(ids)
                     ]
                 )
@@ -156,17 +188,23 @@ def register_tinkercloud_routes(app: FastAPI, engine_client) -> None:
                 )
             )
         prompt_logprobs = None
+        prompt_top_logprobs = None
         if final.prompt_logprobs is not None:
             prompt_logprobs = [
                 None if d is None else _floored(d[t].logprob)
                 for d, t in zip(final.prompt_logprobs, req.token_ids)
             ]
+            if k_prompt:
+                prompt_top_logprobs = [
+                    None if d is None else _top_k(d, k_prompt) for d in final.prompt_logprobs
+                ]
         return Response(
             msgspec.json.encode(
                 GenerateResponse(
                     request_id=request_id,
                     choices=choices,
                     prompt_logprobs=prompt_logprobs,
+                    prompt_top_logprobs=prompt_top_logprobs,
                 )
             ),
             media_type="application/json",
