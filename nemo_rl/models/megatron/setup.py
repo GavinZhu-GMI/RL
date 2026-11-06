@@ -14,6 +14,7 @@
 
 import hashlib
 import json
+import gc
 import os
 import threading
 import time
@@ -1595,6 +1596,12 @@ def setup_reference_model_state(
     finally:
         clear_global_router_replay_instances()
 
+    # The GPU reference model sits in reference cycles (its modules refer back to
+    # their parameters), so it outlives this function until a collection runs and
+    # holds a second copy of the weights on the device. Only the CPU copy is kept.
+    del reference_model
+    gc.collect()
+    torch.cuda.empty_cache()
     return reference_state_dict
 
 

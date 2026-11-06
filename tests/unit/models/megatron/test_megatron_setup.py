@@ -2116,6 +2116,51 @@ class TestSetupReferenceModelState:
     @patch("nemo_rl.models.megatron.setup.init_checkpointing_context")
     @patch("nemo_rl.models.megatron.setup.GlobalState")
     @patch("nemo_rl.models.megatron.setup.get_model")
+    @patch("nemo_rl.models.megatron.setup.checkpoint_exists")
+    @patch("nemo_rl.models.megatron.setup.clear_global_router_replay_instances")
+    @patch("nemo_rl.models.megatron.setup.load_checkpoint")
+    @patch("nemo_rl.models.megatron.setup.HAVE_FSDP2", False)
+    @patch("torch.cuda.empty_cache")
+    @patch("nemo_rl.models.megatron.setup.gc.collect")
+    def test_setup_reference_model_collects_the_model_it_built(
+        self,
+        mock_gc_collect,
+        mock_empty_cache,
+        mock_load_checkpoint,
+        mock_clear_global_router_replay_instances,
+        mock_checkpoint_exists,
+        mock_get_model,
+        mock_global_state,
+        mock_init_ckpt_context,
+        mock_pg_collection,
+    ):
+        """The built reference model sits in reference cycles; it is collected and its cache freed before return."""
+        from nemo_rl.models.megatron.setup import setup_reference_model_state
+
+        mock_model = MagicMock()
+        mock_model.state_dict.return_value = {"layer1.weight": torch.tensor([1.0])}
+        mock_get_model.return_value = [mock_model]
+        mock_global_state.return_value = MagicMock()
+        mock_megatron_cfg = MagicMock()
+        mock_megatron_cfg.dist.use_torch_fsdp2 = False
+        mock_checkpoint_exists.return_value = True
+        order = []
+        mock_gc_collect.side_effect = lambda: order.append("collect")
+        mock_empty_cache.side_effect = lambda: order.append("empty_cache")
+
+        result = setup_reference_model_state(
+            config={"megatron_cfg": {"freeze_moe_router": False}},
+            megatron_cfg=mock_megatron_cfg,
+            pretrained_path="/path/to/pretrained",
+        )
+
+        assert result["layer1.weight"].device.type == "cpu"
+        assert order == ["collect", "empty_cache"]
+
+    @patch("nemo_rl.models.megatron.setup.ProcessGroupCollection")
+    @patch("nemo_rl.models.megatron.setup.init_checkpointing_context")
+    @patch("nemo_rl.models.megatron.setup.GlobalState")
+    @patch("nemo_rl.models.megatron.setup.get_model")
     @patch("nemo_rl.models.megatron.setup.clear_global_router_replay_instances")
     def test_setup_reference_model_clears_router_replay_on_get_model_error(
         self,
