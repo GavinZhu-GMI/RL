@@ -5014,6 +5014,26 @@ class MegatronPolicyWorkerImpl(
                             f"Invalid device: {device}. Only strings 'cpu' and 'cuda' are supported."
                         )
 
+    def set_learning_rate(self, learning_rate: float) -> None:
+        """Set the learning rate every param group trains at from now on.
+
+        The scheduler rewrites each group's lr from its max_lr and min_lr after
+        every train() call; pinning both to the request makes every decay style
+        return it, so the logged lr is the applied one. Warmup ignores both.
+        """
+        if self.scheduler.lr_warmup_steps > 0:
+            raise ValueError(
+                "set_learning_rate needs a scheduler without warmup, got "
+                f"lr_warmup_steps={self.scheduler.lr_warmup_steps}"
+            )
+        for pg in self.optimizer.param_groups:
+            pg["max_lr"] = learning_rate
+            pg["min_lr"] = learning_rate
+            if torch.is_tensor(pg["lr"]):
+                pg["lr"].fill_(learning_rate)
+            else:
+                pg["lr"] = learning_rate
+
     def save_checkpoint(
         self,
         weights_path: str,
