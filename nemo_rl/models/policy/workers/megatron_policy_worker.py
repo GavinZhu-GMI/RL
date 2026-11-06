@@ -87,7 +87,10 @@ from nemo_rl.models.policy.interfaces import (
     ReferenceLogprobOutputSpec,
 )
 from nemo_rl.models.policy.utils import get_runtime_env_for_policy_worker
-from nemo_rl.models.policy.workers.base_policy_worker import AbstractPolicyWorker
+from nemo_rl.models.policy.workers.base_policy_worker import (
+    AbstractPolicyWorker,
+    maybe_seed_from_config,
+)
 from nemo_rl.models.policy.workers.patches import apply_transformer_engine_patch
 from nemo_rl.utils.nsys import wrap_with_nvtx_name
 from nemo_rl.utils.nvml import log_gpu_memory_diagnostics
@@ -275,6 +278,10 @@ class MegatronPolicyWorkerImpl(
         # all node devices here (RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1,
         # set by configure_worker), so it can't identify this worker's GPU.
         bind_to_gpu_numa(local_rank)
+
+        # Seed before ANY model construction: the adapter initializer is
+        # drawn here, in this process, under torch's global RNG.
+        maybe_seed_from_config(config, "MegatronPolicyWorker")
 
         self.cfg = config
         self._router_replay_enabled = router_replay_enabled(config)

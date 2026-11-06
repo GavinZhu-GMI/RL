@@ -71,7 +71,10 @@ from nemo_rl.models.policy.utils import (
     ensure_teacher_ipc_buffer,
     get_runtime_env_for_policy_worker,
 )
-from nemo_rl.models.policy.workers.base_policy_worker import AbstractPolicyWorker
+from nemo_rl.models.policy.workers.base_policy_worker import (
+    AbstractPolicyWorker,
+    maybe_seed_from_config,
+)
 from nemo_rl.models.policy.workers.patches import (
     apply_transformer_engine_patch,
 )
@@ -238,6 +241,10 @@ class DTensorPolicyWorkerV2Impl(
         # ray.get_gpu_ids()[0] is the physical GPU index that keys the affinity
         # file, and reading it does not initialize CUDA.
         bind_to_gpu_numa(int(ray.get_gpu_ids()[0]))
+
+        # Seed before ANY model construction: the adapter initializer is
+        # drawn here, in this process, under torch's global RNG.
+        maybe_seed_from_config(config, "DTensorPolicyWorkerV2")
 
         # Store configuration
         self.cfg = config
