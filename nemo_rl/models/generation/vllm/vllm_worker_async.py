@@ -855,6 +855,12 @@ class VllmAsyncGenerationWorkerImpl(BaseVllmGenerationWorker):
             elif isinstance(generator, TokenizeResponse):
                 return JSONResponse(content=generator.model_dump())
 
+        from nemo_rl.models.generation.vllm.tinkercloud_routes import (
+            register_tinkercloud_routes,
+        )
+
+        register_tinkercloud_routes(app, engine_client)
+
         ########################################
         # Logging
         ########################################
