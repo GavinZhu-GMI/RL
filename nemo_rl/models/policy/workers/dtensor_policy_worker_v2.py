@@ -463,6 +463,7 @@ class DTensorPolicyWorkerV2Impl(
 
             losses = []
             all_mb_metrics = []
+            all_curr_logprobs = []
             for gb_idx in range(num_global_batches):
                 # Process global batch and compute normalization factors
                 gb_result = process_global_batch(
@@ -511,6 +512,8 @@ class DTensorPolicyWorkerV2Impl(
                 # Extract losses and metrics from results
                 mb_losses = []
                 for mb_idx, (loss, loss_metrics) in enumerate(mb_results):
+                    # Separate per-sample tensor outputs from scalar metrics
+                    mb_curr_logprobs = loss_metrics.pop("_curr_logprobs", None)
                     # Only process valid (non-dummy) batches for metrics
                     if mb_idx < iterator_len:
                         num_valid_samples = loss_metrics["num_valid_samples"]
@@ -521,6 +524,8 @@ class DTensorPolicyWorkerV2Impl(
                         if num_valid_samples > 0:
                             mb_losses.append(loss.item())
                             all_mb_metrics.append(loss_metrics)
+                            if mb_curr_logprobs is not None:
+                                all_curr_logprobs.append(mb_curr_logprobs)
 
                 grad_norm: Optional[float | torch.Tensor] = None
                 if not eval_mode:
@@ -567,6 +572,21 @@ class DTensorPolicyWorkerV2Impl(
                 dp_group=self.dp_mesh.get_group(),
                 dtype=self.dtype,
             )
+
+            # Concatenate per-sample logprobs across microbatches (already on CPU).
+            # Shape: [local_batch_size, seq_len-1]. Dynamic batching trims each
+            # microbatch to its own width; right-pad to the shard's width (pad 0.0,
+            # consumers slice by input_lengths). Rows stay in the shard's (possibly
+            # length-sorted) order; Policy.train unsorts.
+            if all_curr_logprobs:
+                width = data.get("input_ids").shape[1] - 1
+                all_curr_logprobs = [
+                    torch.nn.functional.pad(lp, (0, width - lp.shape[1]), value=0.0)
+                    if lp.shape[1] < width
+                    else lp
+                    for lp in all_curr_logprobs
+                ]
+                metrics["curr_logprobs"] = torch.cat(all_curr_logprobs, dim=0)
 
             return metrics
 

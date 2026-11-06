@@ -460,21 +460,21 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
         self,
         data: BatchedDataDict[Any],
         batch_size: int,
-    ) -> list["SlicedDataDict"]:
+    ) -> tuple[list["SlicedDataDict"], Optional[list[int]]]:
         """Shard inputs for ``train``.
 
         Mirrors the legacy shard block (lines 706-729). Note vs.
         ``_shard_for_logprob``: uses ``train_mb_tokens`` (not
-        ``logprob_mb_tokens``), passes ``batch_size`` (not None), and
-        does not return ``unsorted_data_indices`` because train returns
-        scalar metrics (no per-row outputs to reorder).
+        ``logprob_mb_tokens``) and passes ``batch_size`` (not None).
+        Returns ``unsorted_data_indices`` too, to unsort the per-row
+        ``curr_logprobs`` output.
         """
         dp_size = self.data_parallel_size
         if self.use_dynamic_batches:
             self.dynamic_batching_args["max_tokens_per_microbatch"] = self.cfg[
                 "dynamic_batching"
             ]["train_mb_tokens"]
-            sharded_data, _ = data.shard_by_batch_size(
+            sharded_data, unsorted_data_indices = data.shard_by_batch_size(
                 dp_size,
                 batch_size=batch_size,
                 dynamic_batching_args=self.dynamic_batching_args,
@@ -483,7 +483,7 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
             self.sequence_packing_args["max_tokens_per_microbatch"] = self.cfg[
                 "sequence_packing"
             ]["train_mb_tokens"]
-            sharded_data, _ = data.shard_by_batch_size(
+            sharded_data, unsorted_data_indices = data.shard_by_batch_size(
                 dp_size,
                 batch_size=batch_size,
                 sequence_packing_args=self.sequence_packing_args,
@@ -493,7 +493,8 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
                 dp_size,
                 batch_size=batch_size,
             )
-        return sharded_data
+            unsorted_data_indices = None
+        return sharded_data, unsorted_data_indices
 
     def get_logprobs(
         self,
@@ -722,7 +723,9 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
         micro_batch_size = mbs or self.cfg["train_micro_batch_size"]
         # Shard and replicate the batch
         with timer.time("policy_training/sharding_data") if timer else nullcontext():
-            sharded_data = self._shard_for_train(data, batch_size)
+            sharded_data, unsorted_data_indices = self._shard_for_train(
+                data, batch_size
+            )
 
         if self.flops_tracker is not None:
             self.flops_tracker.reset()
@@ -789,6 +792,18 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
             for k, v in r["all_mb_metrics"].items():
                 all_mb_metrics[k].extend(v)
         aggregated_results["all_mb_metrics"] = dict(all_mb_metrics)
+
+        # Per-sample logprobs from all DP workers, in rank order. Dynamic
+        # batching / sequence packing sort by length; undo it as get_logprobs does.
+        # Shape: [global_batch_size, seq_len-1]
+        worker_logprobs = [r["curr_logprobs"] for r in results if "curr_logprobs" in r]
+        if worker_logprobs:
+            curr_logprobs = BatchedDataDict(
+                {"curr_logprobs": torch.cat(worker_logprobs, dim=0)}
+            )
+            if unsorted_data_indices is not None:
+                curr_logprobs.reorder_data(unsorted_data_indices)
+            aggregated_results["curr_logprobs"] = curr_logprobs["curr_logprobs"]
 
         return aggregated_results
 
