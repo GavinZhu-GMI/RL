@@ -594,6 +594,7 @@ class MegatronPolicyWorkerImpl(
 
         with ctx:
             all_mb_metrics = []
+            all_curr_logprobs = []
             losses = []
             total_num_microbatches = 0
             for gb_idx in range(num_global_batches):
@@ -768,6 +769,10 @@ class MegatronPolicyWorkerImpl(
                     gb_loss_metrics = []
                     mb_losses = []
                     for x in losses_reduced:
+                        # per-sample tensor output, not a metric: kept out of the scaling
+                        mb_curr_logprobs = x.pop("_curr_logprobs", None)
+                        if mb_curr_logprobs is not None:
+                            all_curr_logprobs.append(mb_curr_logprobs)
                         loss_metrics = {}
                         for k in x.keys():
                             if "_min" in k or "_max" in k:
@@ -827,6 +832,19 @@ class MegatronPolicyWorkerImpl(
             "all_mb_metrics": mb_metrics,
             "grad_norm": torch.tensor([grad_norm]),
         }
+        # Per-sample logprobs across microbatches, [local_batch_size, seq_len-1] in
+        # the shard's row order (Policy.train unsorts). Microbatches are padded to
+        # their own width: cut or right-pad (0.0) each to the shard's width;
+        # consumers slice by input_lengths. Only the last pipeline stage has them.
+        if all_curr_logprobs:
+            width = data.get("input_ids").shape[1] - 1
+            metrics["curr_logprobs"] = torch.cat(
+                [
+                    torch.nn.functional.pad(lp[:, :width], (0, max(0, width - lp.shape[1])), value=0.0)
+                    for lp in all_curr_logprobs
+                ],
+                dim=0,
+            )
         # Read "config" via getattr-by-string so the token stays out of
         # train.__code__.co_names; with torch 2.11 cloudpickle otherwise
         # matches torch.distributed.config (a non-pickleable ConfigModuleInstance).
