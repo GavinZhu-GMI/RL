@@ -148,6 +148,12 @@ policy:
       lora_A_init_method: "xavier"
       lora_B_init_method: "zero"
       a2a_experimental: false
+      # grouped MoE experts: gate_up lora_A and down lora_B shared across experts (Megatron-Bridge
+      # SharedOuterGroupedExpertAdapter); false keeps the share_expert_adapters layout
+      experts_shared_outer_loras: false
+      # with experts_shared_outer_loras: separate gate and up adapters on the fused gate_up, each with
+      # its own shared hidden-side factor; false keeps one adapter over the fused output
+      experts_shared_outer_separate_gate_up: false
       lora_dtype: None
 
 

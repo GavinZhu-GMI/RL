@@ -238,6 +238,13 @@ class MegatronPeftConfig(TypedDict):
     lora_B_init_method: str
     a2a_experimental: bool
     lora_dtype: str | None
+    # Grouped MoE experts: share gate_up lora_A and down lora_B across experts
+    # (Megatron-Bridge SharedOuterGroupedExpertAdapter). Absent = Megatron-Bridge's
+    # LoRA default (False).
+    experts_shared_outer_loras: NotRequired[bool]
+    # With experts_shared_outer_loras: separate gate and up adapters on the fused
+    # gate_up fc1, each with its own shared hidden-side factor. Absent = False.
+    experts_shared_outer_separate_gate_up: NotRequired[bool]
 
 
 class MegatronOptimizerConfig(TypedDict):

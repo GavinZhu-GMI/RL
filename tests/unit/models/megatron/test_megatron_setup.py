@@ -2412,3 +2412,26 @@ class TestDraftSetup:
             restored_chunk.draft_model.weight,
             owner_chunk.draft_model.weight,
         )
+
+
+@pytest.mark.mcore
+class TestMoeLoraLayoutKwargs:
+    """Tests for _moe_lora_layout_kwargs: the optional MoE adapter keys reach LoRA."""
+
+    def test_present_keys_pass_through(self):
+        from nemo_rl.models.megatron.setup import _moe_lora_layout_kwargs
+
+        peft_cfg = {
+            "dim": 16,
+            "experts_shared_outer_loras": True,
+            "experts_shared_outer_separate_gate_up": True,
+        }
+        assert _moe_lora_layout_kwargs(peft_cfg) == {
+            "experts_shared_outer_loras": True,
+            "experts_shared_outer_separate_gate_up": True,
+        }
+
+    def test_absent_keys_are_left_to_lora(self):
+        from nemo_rl.models.megatron.setup import _moe_lora_layout_kwargs
+
+        assert _moe_lora_layout_kwargs({"dim": 16, "alpha": 32}) == {}

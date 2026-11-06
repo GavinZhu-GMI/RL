@@ -1258,6 +1258,7 @@ def setup_model_and_optimizer(
             lora_B_init_method=peft_cfg["lora_B_init_method"],
             a2a_experimental=peft_cfg["a2a_experimental"],
             lora_dtype=peft_cfg["lora_dtype"],
+            **_moe_lora_layout_kwargs(peft_cfg),
         )
     else:
         peft = None
@@ -1445,6 +1446,18 @@ def handle_model_import(
         parallel_state.destroy_model_parallel()
 
 
+def _moe_lora_layout_kwargs(peft_cfg: dict) -> dict:
+    """The optional MoE expert-adapter layout keys present in peft_cfg.
+
+    Absent keys are left out, so LoRA keeps its own defaults for them.
+    """
+    return {
+        k: peft_cfg[k]
+        for k in ("experts_shared_outer_loras", "experts_shared_outer_separate_gate_up")
+        if k in peft_cfg
+    }
+
+
 def setup_reference_model_state(
     config: PolicyConfig,
     megatron_cfg: ConfigContainer,
@@ -1509,6 +1522,7 @@ def setup_reference_model_state(
             lora_B_init_method="zero",
             a2a_experimental=peft_cfg["a2a_experimental"],
             lora_dtype=peft_cfg["lora_dtype"],
+            **_moe_lora_layout_kwargs(peft_cfg),
         )
     else:
         peft = None
