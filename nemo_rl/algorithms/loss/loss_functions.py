@@ -720,6 +720,9 @@ class ClippedPGLossFn(LossFunction):
                 "approx_entropy": seq_entropy_approx.item(),
                 **_is_filter_metrics,
                 "positive_nll_loss": nll_loss.item(),
+                # Per-sample logprobs under current policy (detached, no grad).
+                # Keyed with underscore prefix to distinguish from scalar metrics.
+                "_curr_logprobs": curr_logprobs.detach().cpu(),
             },
         )
 
