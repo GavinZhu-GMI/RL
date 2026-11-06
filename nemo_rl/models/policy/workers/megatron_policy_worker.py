@@ -833,11 +833,12 @@ class MegatronPolicyWorkerImpl(
             "grad_norm": torch.tensor([grad_norm]),
         }
         # Per-sample logprobs across microbatches, [local_batch_size, seq_len-1] in
-        # the shard's row order (Policy.train unsorts). Microbatches are padded to
-        # their own width: cut or right-pad (0.0) each to the shard's width;
-        # consumers slice by input_lengths. Only the last pipeline stage has them.
+        # the shard's row order (Policy.train unsorts). Each microbatch has its own
+        # width (get_microbatch_iterator's padded_seq_length under dynamic batching):
+        # cut or right-pad (0.0) each to the shard's width; consumers slice by
+        # input_lengths. Only the last pipeline stage has them.
         if all_curr_logprobs:
-            width = data.get("input_ids").shape[1] - 1
+            width = data["input_ids"].shape[1] - 1
             metrics["curr_logprobs"] = torch.cat(
                 [
                     torch.nn.functional.pad(lp[:, :width], (0, max(0, width - lp.shape[1])), value=0.0)
@@ -1693,7 +1694,8 @@ class MegatronPolicyWorkerImpl(
 
         The scheduler rewrites each group's lr from its max_lr and min_lr after
         every train() call; pinning both to the request makes every decay style
-        return it, so the logged lr is the applied one. Warmup ignores both.
+        return it, so the logged lr is the applied one. Warmup ignores both
+        (OptimizerParamScheduler.get_lr interpolates from init_lr).
         """
         if self.scheduler.lr_warmup_steps > 0:
             raise ValueError(

@@ -586,7 +586,7 @@ class DTensorPolicyWorkerV2Impl(
             # consumers slice by input_lengths). Rows stay in the shard's (possibly
             # length-sorted) order; Policy.train unsorts.
             if all_curr_logprobs:
-                width = data.get("input_ids").shape[1] - 1
+                width = data["input_ids"].shape[1] - 1
                 all_curr_logprobs = [
                     torch.nn.functional.pad(lp, (0, width - lp.shape[1]), value=0.0)
                     if lp.shape[1] < width
