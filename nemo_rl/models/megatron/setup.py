@@ -1448,13 +1448,17 @@ def handle_model_import(
 
 
 def _moe_lora_layout_kwargs(peft_cfg: dict) -> dict:
-    """The optional MoE expert-adapter layout keys present in peft_cfg.
+    """The optional adapter layout keys present in peft_cfg (MoE experts, split qkv).
 
     Absent keys are left out, so LoRA keeps its own defaults for them.
     """
     return {
         k: peft_cfg[k]
-        for k in ("experts_shared_outer_loras", "experts_shared_outer_separate_gate_up")
+        for k in (
+            "experts_shared_outer_loras",
+            "experts_shared_outer_separate_gate_up",
+            "split_qkv_adapters",
+        )
         if k in peft_cfg
     }
 

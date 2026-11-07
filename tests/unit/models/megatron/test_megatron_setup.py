@@ -2470,10 +2470,12 @@ class TestMoeLoraLayoutKwargs:
             "dim": 16,
             "experts_shared_outer_loras": True,
             "experts_shared_outer_separate_gate_up": True,
+            "split_qkv_adapters": True,
         }
         assert _moe_lora_layout_kwargs(peft_cfg) == {
             "experts_shared_outer_loras": True,
             "experts_shared_outer_separate_gate_up": True,
+            "split_qkv_adapters": True,
         }
 
     def test_absent_keys_are_left_to_lora(self):

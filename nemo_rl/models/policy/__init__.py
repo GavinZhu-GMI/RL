@@ -245,6 +245,9 @@ class MegatronPeftConfig(TypedDict):
     # With experts_shared_outer_loras: separate gate and up adapters on the fused
     # gate_up fc1, each with its own shared hidden-side factor. Absent = False.
     experts_shared_outer_separate_gate_up: NotRequired[bool]
+    # Separate q, k, v adapters on the fused linear_qkv (Megatron-Bridge LoRA
+    # split_qkv_adapters, CanonicalLoRA's split form). Absent = False.
+    split_qkv_adapters: NotRequired[bool]
 
 
 class MegatronOptimizerConfig(TypedDict):
