@@ -1705,10 +1705,7 @@ class MegatronPolicyWorkerImpl(
         for pg in self.optimizer.param_groups:
             pg["max_lr"] = learning_rate
             pg["min_lr"] = learning_rate
-            if torch.is_tensor(pg["lr"]):
-                pg["lr"].fill_(learning_rate)
-            else:
-                pg["lr"] = learning_rate
+            pg["lr"] = learning_rate
 
     def save_checkpoint(
         self,

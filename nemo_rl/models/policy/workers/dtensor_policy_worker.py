@@ -912,6 +912,9 @@ class DTensorPolicyWorkerImpl(
                             )
                         del logits
 
+                        # this worker returns no per-token logprobs: drop the per-token output
+                        # some losses emit, before the scalar metrics are scaled and summed
+                        loss_metrics.pop("_curr_logprobs", None)
                         # skip the update for dummy batches
                         if mb_idx < iterator_len:
                             ## scale by the number of global batches so we get the correct

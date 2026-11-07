@@ -168,10 +168,14 @@ class SequencePackingLossWrapper:
                 else:
                     metrics_accum[k] += val
 
-        # Concatenate non-scalar tensor outputs across packed sequences.
-        for k in list(metrics_accum.keys()):
-            if isinstance(metrics_accum[k], list) and metrics_accum[k]:
-                metrics_accum[k] = torch.cat(metrics_accum[k], dim=0)
+        # The "_"-prefixed per-token outputs: one row per packed sequence, right-padded
+        # (0.0) to the widest, as the workers lay out per-sample rows.
+        for k in [k for k in metrics_accum if k.startswith("_")]:
+            width = max(t.shape[-1] for t in metrics_accum[k])
+            metrics_accum[k] = torch.cat(
+                [torch.nn.functional.pad(t, (0, width - t.shape[-1]), value=0.0) for t in metrics_accum[k]],
+                dim=0,
+            )
 
         return loss_accum, metrics_accum
 

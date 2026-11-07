@@ -17,8 +17,8 @@
 (token_ids, sampling_params, cache_salt) and answers with flat logprobs. vLLM's
 own route builds two pydantic objects per token and serialises them with
 model_dump + json.dumps; when every sequence of a step finishes together each
-worker serialises its responses back to back, ~2 s per 130k tokens at any model
-size. Here a choice carries token_ids, finish_reason and logprobs as
+worker serialises its responses back to back, a cost that grows with the step's
+tokens and not with the model. Here a choice carries token_ids, finish_reason and logprobs as
 {"content": [{"logprob": x}, ...]} (the sampled token's logprob, floored to
 CLAMPED_LOGPROB where vLLM has no finite value, the shape SkyRL's own generate
 route uses); prompt_logprobs is a flat list with None at position 0. When the
@@ -35,8 +35,10 @@ carries every child of an n > 1 request in it.
 /tinkercloud/v1/update_weights_from_collective and /tinkercloud/v1/reset_prefix_cache
 drive the non-colocated refit from the same app. The worker's Ray methods for
 these run on the actor's event loop in another thread, while the generate route
-runs on uvicorn's; both reach the engine core over one ZMQ socket, which is not
-thread-safe, and a collision corrupts a frame and kills the core's input reader.
+runs on uvicorn's; both reach the engine core over one ZMQ socket, and ZeroMQ
+sockets are not thread-safe (ZeroMQ guide, "Multithreading with ZeroMQ"). A
+collision is the likely cause (a hypothesis) of the engine core's input reader
+dying under concurrent refit and generate.
 Serving the refit here puts every engine-core call on one loop, the shape
 SkyRL's server uses.
 

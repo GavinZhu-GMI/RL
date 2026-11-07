@@ -506,6 +506,8 @@ class PolicyConfig(TypedDict):
     train_global_batch_size: int
     train_micro_batch_size: int
     logprob_batch_size: NotRequired[int]
+    # RNG seed the policy workers set at construction; absent, RNG state is left untouched
+    seed: NotRequired[int]
     # If set, log probability computation is chunked along the sequence dimension to avoid GPU OOM (especially during backward pass).
     # Within each chunk loop, logits casting (from float16/bfloat16 to float32) is done to prevent holding the entire float32 logits tensor in memory.
     # If None, chunking is disabled and the full sequence is processed at once.

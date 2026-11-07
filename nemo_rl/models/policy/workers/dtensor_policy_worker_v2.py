@@ -582,15 +582,13 @@ class DTensorPolicyWorkerV2Impl(
 
             # Concatenate per-sample logprobs across microbatches (already on CPU).
             # Shape: [local_batch_size, seq_len-1]. Dynamic batching trims each
-            # microbatch to its own width; right-pad to the shard's width (pad 0.0,
+            # microbatch to its own width; cut or right-pad to the shard's width (pad 0.0,
             # consumers slice by input_lengths). Rows stay in the shard's (possibly
             # length-sorted) order; Policy.train unsorts.
             if all_curr_logprobs:
                 width = data["input_ids"].shape[1] - 1
                 all_curr_logprobs = [
-                    torch.nn.functional.pad(lp, (0, width - lp.shape[1]), value=0.0)
-                    if lp.shape[1] < width
-                    else lp
+                    torch.nn.functional.pad(lp[:, :width], (0, max(0, width - lp.shape[1])), value=0.0)
                     for lp in all_curr_logprobs
                 ]
                 metrics["curr_logprobs"] = torch.cat(all_curr_logprobs, dim=0)
@@ -1290,9 +1288,10 @@ class DTensorPolicyWorkerV2Impl(
 
     def set_learning_rate(self, learning_rate: float) -> None:
         """Set the learning rate on the optimizer's param groups."""
-        if self.optimizer is not None:
-            for pg in self.optimizer.param_groups:
-                pg["lr"] = learning_rate
+        if self.optimizer is None:
+            raise RuntimeError("set_learning_rate needs a worker built with an optimizer")
+        for pg in self.optimizer.param_groups:
+            pg["lr"] = learning_rate
 
     def move_optimizer_to_device(self, device: str | torch.device) -> None:
         for state in self.optimizer.state.values():
