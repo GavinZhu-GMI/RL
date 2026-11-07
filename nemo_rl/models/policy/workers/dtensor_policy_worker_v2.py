@@ -531,8 +531,10 @@ class DTensorPolicyWorkerV2Impl(
                         if num_valid_samples > 0:
                             mb_losses.append(loss.item())
                             all_mb_metrics.append(loss_metrics)
-                            if mb_curr_logprobs is not None:
-                                all_curr_logprobs.append(mb_curr_logprobs)
+                        # rows of an all-padding microbatch too: curr_logprobs has one row per
+                        # sample of the shard, as the Megatron worker returns it
+                        if mb_curr_logprobs is not None:
+                            all_curr_logprobs.append(mb_curr_logprobs)
 
                 grad_norm: Optional[float | torch.Tensor] = None
                 if not eval_mode:
